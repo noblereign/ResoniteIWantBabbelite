@@ -697,7 +697,7 @@ public class IWantBabbelite : ResoniteMod {
 
 										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Transcription", trimmed);
 										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.IsCompleted", completed);
-										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Confidence", confidence);
+										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Confidence", confidence ?? 1f);
 										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Language", language);
 									}
 								}
