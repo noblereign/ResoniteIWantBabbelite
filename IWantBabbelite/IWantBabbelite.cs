@@ -3,15 +3,12 @@
 using HarmonyLib;
 
 using ResoniteModLoader;
-
 using Elements.Assets;
 using Elements.Core;
-
 using Babbelite.Client;
 using Babbelite.Shared;
-
 using System.Net.WebSockets;
-
+using System.Buffers;
 
 
 
@@ -35,13 +32,27 @@ public class IWantBabbelite : ResoniteMod {
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<bool> Enabled = new("Enabled", "Enables the mod.", () => true);
 
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<bool> ExposeToWorld = new("Expose to world", "Makes your personal transcription global for anyone to read, even without the mod.", () => false);
+
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<bool> Filter = new("Filter common hallucinations", "Ignores common erroneous output like '[BLANK_AUDIO]'.", () => true);
+
+	//TODO: Distance check (to try and not run out of vram)?
+
 	private static BabbeliteClient? _babbeliteManager;
-	private static readonly Dictionary<RefID, LiveTranscriptionSession> _userSessions = [];
-	private static readonly HashSet<RefID> _pendingSessions = [];
+	private static readonly Dictionary<(World World, RefID RefID), LiveTranscriptionSession> _userSessions = [];
+	private static readonly HashSet<(World World, RefID RefID)> _pendingSessions = [];
+	private static readonly HashSet<(World World, RefID RefID)> _transmitting = [];
 	private static DateTime _lastErrorNotificationTime = DateTime.MinValue;
 
-	private static readonly Dictionary<RefID, List<float>> _audioAccumulators = [];
-	private const int SILERO_CHUNK_SIZE = 512; 
+	private static readonly Dictionary<(World World, RefID RefID), List<float>> _audioAccumulators = [];
+	private static readonly Dictionary<(World World, RefID RefID), DateTime> _lastHeardFrom = [];
+	private const int SILERO_CHUNK_SIZE = 512;
+
+	const string SLOT_NAME = "Babbelite";
+	private static readonly SearchValues<string> Hallucinations = SearchValues.Create(["(silence)", "*mimics a video*", "[Buzzer]", "[BLANK_AUDIO]", "[silence]", "[no audio]"], StringComparison.OrdinalIgnoreCase);
+
 
 	public override void OnEngineInit() {
 #if DEBUG
@@ -56,6 +67,7 @@ public class IWantBabbelite : ResoniteMod {
 
 		Config = GetConfiguration()!;
 		Config!.Save(true);
+		Config.OnThisConfigurationChanged += OnConfigurationChanged;
 		// Call setup method
 		Setup();
 	}
@@ -72,6 +84,7 @@ public class IWantBabbelite : ResoniteMod {
 		// Unpatch Harmony
 		Harmony harmony = new(harmonyId);
 		harmony.UnpatchAll(harmonyId);
+		ResetState();
 	}
 
 	// This is called in the newly loaded assembly
@@ -84,6 +97,27 @@ public class IWantBabbelite : ResoniteMod {
 		Setup();
 	}
 #endif
+
+	private static void ResetState() {
+		lock (_userSessions) {
+			foreach (LiveTranscriptionSession session in _userSessions.Values) {
+				session?.Dispose();
+			}
+
+			_userSessions.Clear(); 
+		}
+		lock (_pendingSessions) { _pendingSessions.Clear(); }
+		lock (_audioAccumulators) { _audioAccumulators.Clear(); }
+		lock (_transmitting) { _transmitting.Clear(); }
+		lock (_lastHeardFrom) { _lastHeardFrom.Clear(); }
+	}
+
+	private void OnConfigurationChanged(ConfigurationChangedEvent @event) {
+		if (@event.Key == Enabled && !Config!.GetValue(Enabled)) {
+			Msg("Mod was disabled, shutting down Babbelite client...");
+			ResetState();
+		}
+	}
 
 
 	// patches for babbelite itself
@@ -121,69 +155,36 @@ public class IWantBabbelite : ResoniteMod {
 		});
 	}
 
-	// patching babbelite itself to return more useful error messages
+	// return more useful error messages
 	[HarmonyPatch(typeof(BabbeliteConnection), nameof(BabbeliteConnection.CreateTranscriptionSession))]
 	class BabbeliteConnection_CreateTranscriptionSession_Patch {
-		static bool Prefix(BabbeliteConnection __instance, string sessionId, ref Task<LiveTranscriptionSession> __result) {
-			__result = CreateSessionSafe(__instance, sessionId);
-			return false;
-		}
+		static void Postfix(BabbeliteConnection __instance, string sessionId, ref Task<LiveTranscriptionSession> __result) {
+			var originalTask = __result;
 
-		static async Task<LiveTranscriptionSession> CreateSessionSafe(BabbeliteConnection connection, string sessionId) {
-			if (string.IsNullOrWhiteSpace(sessionId))
-				sessionId = Guid.NewGuid().ToString();
-
-			var createMessage = new CreateLiveTranscribeSession() {
-				SessionId = sessionId,
-			};
-
-			var method = (typeof(BabbeliteConnection)
-				.GetMethod("SendMessage", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
-				?.MakeGenericMethod(typeof(CreateLiveTranscribeSession), typeof(Response))) ?? throw new InvalidOperationException("Could not find SendMessage on BabbeliteConnection");
-			try {
-				var task = (Task<Response>)method.Invoke(connection, [createMessage])!;
-				var response = await task.ConfigureAwait(false) ?? throw new Exception("Received null response from Babbelite server.");
-				if (!response.IsSuccess)
-					throw new Exception($"Server Error: {response.ErrorMessage}");
-
-				if (response is TranscribeSessionCreated created) {
-					var session = new LiveTranscriptionSession(connection, created.SessionId, created.SampleRate);
-					var sessionsDict = Traverse.Create(connection).Field<Dictionary<string, LiveTranscriptionSession>>("_transcriptionSessions").Value;
-					lock (sessionsDict) {
-						sessionsDict[sessionId] = session;
-					}
+			__result = Task.Run(async () => {
+				try {
+					var session = await originalTask.ConfigureAwait(false) ?? throw new Exception("Received null response from Babbelite server.");
 					return session;
-				}
 
-				throw new Exception($"Unexpected response type from server: {response.GetType().Name}");
-			} catch (Exception ex) {
-				if (ex.InnerException is System.Net.Sockets.SocketException ||
-					ex.InnerException is IOException ||
-					ex.InnerException is WebSocketException) {
-					Warn("Lost connection to Babbelite server!");
+				} catch (Exception ex) {
+					if (ex.InnerException is System.Net.Sockets.SocketException ||
+						ex.InnerException is IOException ||
+						ex.InnerException is WebSocketException) {
 
-					World world = Engine.Current.WorldManager.FocusedWorld;
-					world?.RunSynchronously(() => {
+						Warn($"Lost connection to Babbelite server while creating session {sessionId}");
+
+						World world = Engine.Current.WorldManager.FocusedWorld;
+						world?.RunSynchronously(() => {
 							NotificationMessage.SpawnTextMessage($"Lost connection to Babbelite server!", colorX.Red, 0.65f, 5f);
 						});
 
-					lock (_userSessions) { _userSessions.Clear(); }
-					lock (_pendingSessions) { _pendingSessions.Clear(); }
-					lock (_audioAccumulators) { _audioAccumulators.Clear(); }
+						ResetState();
 
-					// manually remove it from BabbeliteClient ourselves
-					if (_babbeliteManager != null) {
-						var connectionsList = Traverse.Create(_babbeliteManager).Field<List<BabbeliteConnection>>("_connections").Value;
-						if (connectionsList != null) {
-							lock (connectionsList) {
-								connectionsList.Remove(connection);
-							}
-						}
+						try { Traverse.Create(__instance).Method("Disconnect").GetValue(); } catch { }
 					}
+					throw;
 				}
-
-				throw;
-			}
+			});
 		}
 	}
 
@@ -195,12 +196,10 @@ public class IWantBabbelite : ResoniteMod {
 
 				World world = Engine.Current.WorldManager.FocusedWorld;
 				world?.RunSynchronously(() => {
-						NotificationMessage.SpawnTextMessage($"Disconnected from Babbelite server.", colorX.Orange, 0.65f, 5f);
-					});
+					NotificationMessage.SpawnTextMessage($"Disconnected from Babbelite server.", colorX.Orange, 0.65f, 5f);
+				});
 
-				lock (_userSessions) { _userSessions.Clear(); }
-				lock (_pendingSessions) { _pendingSessions.Clear(); }
-				lock (_audioAccumulators) { _audioAccumulators.Clear(); }
+				ResetState();
 			};
 		}
 	}
@@ -211,6 +210,7 @@ public class IWantBabbelite : ResoniteMod {
 	class OpusStream_Decode_Patch {
 		public static void Postfix(OpusStream<MonoSample> __instance, ref float[] buffer, int __result) {
 			if (__result <= 0 || buffer == null) return;
+			if (__instance.Name != "Voice") return;
 
 			User user = __instance.User;
 			if (user == null) return;
@@ -227,6 +227,7 @@ public class IWantBabbelite : ResoniteMod {
 	class OpusStream_Encode_Patch {
 		public static void Prefix(OpusStream<MonoSample> __instance, float[] buffer, int count) {
 			if (count <= 0 || buffer == null) return;
+			if (__instance.Name != "Voice") return;
 
 			User user = __instance.User;
 			if (user == null) return;
@@ -238,23 +239,104 @@ public class IWantBabbelite : ResoniteMod {
 		}
 	}
 
+	// write null to transcription when muting
+	[HarmonyPatch(typeof(User), nameof(User.VoiceMode), MethodType.Setter)]
+	class User_VoiceMode_Patch {
+		public static void Postfix(User __instance, VoiceMode value) {
+			if (__instance == null) return;
+			if (!__instance.IsLocalUser) return;
+
+			if (value == VoiceMode.Mute) {
+				static void ClearTranscription(Slot slot) {
+					DynamicValueVariable<string>? dynVar = slot.GetComponent<DynamicValueVariable<string>>(v => v.VariableName.Value == "User/Babbelite.Transcription");
+					if (dynVar == null) {
+						dynVar = slot.AttachComponent<DynamicValueVariable<string>>();
+						dynVar.VariableName.Value = "User/Babbelite.Transcription";
+					}
+					DynamicVariableHelper.WriteDynamicVariable<string>(slot, "User/Babbelite.Transcription", string.Empty);
+				}
+
+				Slot? globalBabbeliteSlot = __instance.Root.Slot.FindChild(SLOT_NAME);
+				Slot? localBabbeliteSlot = __instance.Root.Slot.FindLocalChild(SLOT_NAME);
+
+				if (globalBabbeliteSlot != null) {
+					ClearTranscription(globalBabbeliteSlot);
+				}
+				if (localBabbeliteSlot != null) {
+					ClearTranscription(localBabbeliteSlot);
+				}
+			}
+		}
+	}
+
 	[HarmonyPatch(typeof(OpusStream<MonoSample>), "OnDispose")]
 	class OpusStream_Dispose_Patch {
 		public static void Postfix(OpusStream<MonoSample> __instance) {
 			User user = __instance.User;
 			if (user != null) {
-				if (_userSessions.TryGetValue(user.ReferenceID, out var session)) {
+				if (_userSessions.TryGetValue((user.World, user.ReferenceID), out var session)) {
 					Msg($"Cleaning up {user.UserName}'s Babbelite session");
 					session.Dispose();
 					lock (_userSessions) {
-						_userSessions.Remove(user.ReferenceID);
+						_userSessions.Remove((user.World, user.ReferenceID));
 					}
 				}
 				lock (_pendingSessions) {
-					_pendingSessions.Remove(user.ReferenceID);
+					_pendingSessions.Remove((user.World, user.ReferenceID));
 				}
 				lock (_audioAccumulators) {
-					_audioAccumulators.Remove(user.ReferenceID);
+					_audioAccumulators.Remove((user.World, user.ReferenceID));
+				}
+				lock (_lastHeardFrom) {
+					_lastHeardFrom.Remove((user.World, user.ReferenceID));
+				}
+				lock (_transmitting) {
+					_transmitting.Remove((user.World, user.ReferenceID));
+				}
+			}
+		}
+	}
+
+	[HarmonyPatch(typeof(World), "Dispose")]
+	class World_Dispose_Patch {
+		static void Postfix(World __instance) {
+			HashSet<RefID> userRefs = [];
+			foreach (var user in __instance.AllUsers) {
+				if (user != null) {
+					userRefs.Add(user.ReferenceID);
+				}
+			}
+
+			lock (_userSessions) {
+				foreach (var refId in userRefs) {
+					if (_userSessions.TryGetValue((__instance, refId), out var session)) {
+						session?.Dispose();
+						_userSessions.Remove((__instance, refId));
+					}
+				}
+			}
+
+			lock (_pendingSessions) {
+				foreach (var refId in userRefs) {
+					_pendingSessions.Remove((__instance, refId));
+				}
+			}
+
+			lock (_audioAccumulators) {
+				foreach (var refId in userRefs) {
+					_audioAccumulators.Remove((__instance, refId));
+				}
+			}
+
+			lock (_lastHeardFrom) {
+				foreach (var refId in userRefs) {
+					_lastHeardFrom.Remove((__instance, refId));
+				}
+			}
+
+			lock (_transmitting) {
+				foreach (var refId in userRefs) {
+					_transmitting.Remove((__instance, refId));
 				}
 			}
 		}
@@ -300,78 +382,67 @@ public class IWantBabbelite : ResoniteMod {
 	}
 
 	private static void ProcessAudio(User user, float[] audioData, int sourceSampleRate) {
+		if (!Config!.GetValue(Enabled)) return;
+
 		RefID refId = user.ReferenceID;
+		World world = user.World;
 		string userName = user.UserName;
 		string userId = user.UserID;
 		byte allocationId = user.AllocationID;
 
-		if (_babbeliteManager == null || _babbeliteManager.ConnectionCount <= 0) {
-			return;
-		}
+		if (_babbeliteManager == null || _babbeliteManager.ConnectionCount <= 0) return;
 
-		if (_userSessions.TryGetValue(refId, out LiveTranscriptionSession? session)) {
+		if (_userSessions.TryGetValue((world, refId), out LiveTranscriptionSession? session)) {
 			float[] resampled = ResampleAudio(audioData, sourceSampleRate, session.SampleRate);
-
-			if (resampled == null || resampled.Length == 0)
-				return;
+			if (resampled == null || resampled.Length == 0) return;
 
 			lock (_audioAccumulators) {
-				if (!_audioAccumulators.TryGetValue(refId, out List<float>? accumulator)) {
+				if (!_audioAccumulators.TryGetValue((world, refId), out List<float>? accumulator)) {
 					accumulator = new List<float>(SILERO_CHUNK_SIZE * 4);
-					_audioAccumulators[refId] = accumulator;
+					_audioAccumulators[(world, refId)] = accumulator;
 				}
 
 				accumulator.AddRange(resampled);
 
-				while (accumulator.Count >= SILERO_CHUNK_SIZE) {
+				if (accumulator.Count >= SILERO_CHUNK_SIZE && !_transmitting.Contains((world, refId))) {
+					lock (_lastHeardFrom) { _lastHeardFrom[(world, refId)] = DateTime.UtcNow; }
+					lock (_transmitting) { _transmitting.Add((world, refId)); }
+
 					float[] chunkToPush = [.. accumulator.GetRange(0, SILERO_CHUNK_SIZE)];
 					accumulator.RemoveRange(0, SILERO_CHUNK_SIZE);
 
-					session.PushAudioData(chunkToPush).ContinueWith(t => {
-						if (t.IsFaulted && t.Exception != null) {
-							string errorMsg = t.Exception.InnerException?.Message ?? t.Exception.Message;
-							if (!errorMsg.Contains("disposed") && !errorMsg.Contains("ClientWebSocket")) {
-								Error($"PushAudioData error for {userName}: {errorMsg}");
-							}
+					_ = Task.Run(async () => {
+						try {
+							await session.PushAudioData(chunkToPush);
+						} catch (Exception ex) {
+							string errorMsg = ex.InnerException?.Message ?? ex.Message;
 							if (errorMsg.Contains("disposed") || errorMsg.Contains("aborted") || errorMsg.Contains("ClientWebSocket")) {
-								lock (_userSessions) { _userSessions.Clear(); }
-								lock (_pendingSessions) { _pendingSessions.Clear(); }
-								lock (_audioAccumulators) { _audioAccumulators.Clear(); }
-
-								if (_babbeliteManager != null) {
-									var connectionsList = Traverse.Create(_babbeliteManager).Field<List<BabbeliteConnection>>("_connections").Value;
-									if (connectionsList != null) {
-										lock (connectionsList) {
-											connectionsList.Clear();
-										}
-									}
-								}
+								ResetState();
 							}
+						} finally {
+							lock (_transmitting) { _transmitting.Remove((world, refId)); }
 						}
-					}, TaskContinuationOptions.OnlyOnFaulted);
+					});
 				}
 			}
 
 			return;
 		}
 
-		if (_pendingSessions.Contains(refId)) {
-			return;
-		}
+		if (_pendingSessions.Contains((world, refId))) return;
 
 		Msg($"Requesting new Babbelite session for {userName}");
-		_pendingSessions.Add(refId);
+		_pendingSessions.Add((world, refId));
 
 		Task.Run(async () => {
 			try {
 				LiveTranscriptionSession newSession = await _babbeliteManager!.CreateTranscriptionSession(userId);
 
 				lock (_userSessions) {
-					_userSessions[refId] = newSession;
+					_userSessions[(world, refId)] = newSession;
 				}
 
 				newSession.TranscriptionUpdated += (transcription) => {
-					Msg("Transcription updated.");
 					try {
 						World world = Engine.Current.WorldManager.FocusedWorld;
 						if (world == null) return;
@@ -380,16 +451,56 @@ public class IWantBabbelite : ResoniteMod {
 							try {
 								User targetUser = world.GetUserByAllocationID(allocationId);
 								if (targetUser != null) {
-									Slot localBabbeliteSlot = targetUser.Root.Slot.FindChildOrAdd("Babbelite");
+									Slot? globalBabbeliteSlot = targetUser.Root.Slot.FindChild(SLOT_NAME);
+									Slot? localBabbeliteSlot = targetUser.Root.Slot.FindLocalChild(SLOT_NAME);
 
-									DynamicValueVariable<string>? dynVar = localBabbeliteSlot.GetComponent<DynamicValueVariable<string>>(v => v.VariableName.Value == "User/Babbelite.Transcription");
-									if (dynVar == null) {
-										dynVar = localBabbeliteSlot.AttachComponent<DynamicValueVariable<string>>();
-										dynVar.VariableName.Value = "User/Babbelite.Transcription";
+									bool exposeToWorld = Config!.GetValue(ExposeToWorld);
+
+									if (targetUser.IsLocalUser) {
+										if (exposeToWorld) { // exposing self transcription to world
+											if (localBabbeliteSlot != null) {
+												localBabbeliteSlot.Destroy();
+												localBabbeliteSlot = null;
+											}
+
+											globalBabbeliteSlot ??= targetUser.Root.Slot.AddSlot(SLOT_NAME);
+
+											WriteTranscription(globalBabbeliteSlot, transcription.Text);
+										} else { // keeping self transcription local
+											if (globalBabbeliteSlot != null) {
+												globalBabbeliteSlot.Destroy();
+												globalBabbeliteSlot = null;
+											}
+
+											localBabbeliteSlot ??= targetUser.Root.Slot.FindLocalChildOrAdd(SLOT_NAME);
+
+											WriteTranscription(localBabbeliteSlot, transcription.Text);
+										}
+									} else { // other players
+										if (globalBabbeliteSlot != null) { // this user has the mod and is exposing their babbelite slot
+											localBabbeliteSlot?.Destroy();
+										} else { // this user does not have the mod, so transcribe locally
+											//TODO: Whisper bubble/in hearing range check?
+											localBabbeliteSlot ??= targetUser.Root.Slot.FindLocalChildOrAdd(SLOT_NAME);
+
+											WriteTranscription(localBabbeliteSlot, transcription.Text);
+										}
 									}
 
-									Msg($"{targetUser.userName}: {transcription.Text}");
-									DynamicVariableHelper.WriteDynamicVariable(localBabbeliteSlot, "User/Babbelite.Transcription", transcription.Text);
+									static void WriteTranscription(Slot slot, string text) {
+										string trimmed = text.Trim();
+										if (Config!.GetValue(Filter)) {
+											if (Hallucinations.Contains(trimmed)) return;
+										}
+
+
+										DynamicValueVariable<string>? dynVar = slot.GetComponent<DynamicValueVariable<string>>(v => v.VariableName.Value == "User/Babbelite.Transcription");
+										if (dynVar == null) {
+											dynVar = slot.AttachComponent<DynamicValueVariable<string>>();
+											dynVar.VariableName.Value = "User/Babbelite.Transcription";
+										}
+										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Transcription", trimmed);
+									}
 								}
 							} catch (Exception innerEx) {
 								Error($"RunSynchronously error: {innerEx}");
@@ -400,7 +511,31 @@ public class IWantBabbelite : ResoniteMod {
 					}
 				};
 
+				_ = Task.Run(async () => {
+					float[] silentChunk = new float[SILERO_CHUNK_SIZE];
+					while (_userSessions.ContainsKey((world, refId))) {
+						await Task.Delay(32);
+
+						DateTime lastAudio;
+						lock (_lastHeardFrom) {
+							if (!_lastHeardFrom.TryGetValue((world, refId), out lastAudio)) {
+								lastAudio = DateTime.UtcNow;
+							}
+						}
+
+						if ((DateTime.UtcNow - lastAudio).TotalMilliseconds > 150) {
+							if (!_transmitting.Contains((world, refId))) {
+								lock (_transmitting) { _transmitting.Add((world, refId)); }
+								try { await newSession.PushAudioData(silentChunk); } catch { } finally { lock (_transmitting) { _transmitting.Remove((world, refId)); } }
+							}
+						}
+					}
+				});
+
 				Msg($"Transcription session established for {userName}. Server is requesting sample rate of {newSession.SampleRate}Hz");
+				lock (_pendingSessions) {
+					_pendingSessions.Remove((world, refId));
+				}
 			} catch (Exception ex) {
 				Warn($"Failed to create Babbelite session for {userName}: {ex.Message}");
 
@@ -433,7 +568,7 @@ public class IWantBabbelite : ResoniteMod {
 				await Task.Delay(5000);
 
 				lock (_pendingSessions) {
-					_pendingSessions.Remove(refId);
+					_pendingSessions.Remove((world, refId));
 				}
 			}
 		});
