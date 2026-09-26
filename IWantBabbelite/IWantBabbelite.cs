@@ -111,7 +111,9 @@ public class IWantBabbelite : ResoniteMod {
 		Msg("Resetting babbelite state");
 		lock (_userSessions) {
 			foreach (LiveTranscriptionSession session in _userSessions.Values) {
-				session?.Dispose();
+				_ = Task.Run(() => {
+					try { session?.Dispose(); } catch { }
+				});
 			}
 
 			_userSessions.Clear(); 
@@ -144,17 +146,26 @@ public class IWantBabbelite : ResoniteMod {
 		lock (_transmitting) { _transmitting.Remove((world, refId)); }
 		lock (_audioManagers) { _audioManagers.Remove((world, refId)); }
 
-		try { session?.Dispose(); } catch { }
+		_ = Task.Run(() => {
+			try { session?.Dispose(); } catch { }
+		});
 
 		if (killConnection) {
-			try {
-				var conn = Traverse.Create(session).Property("Connection").GetValue() ??
-						   Traverse.Create(session).Field("_connection").GetValue();
+			_ = Task.Run(() => {
+				try {
+					var conn = Traverse.Create(session).Property("Connection").GetValue() ??
+							   Traverse.Create(session).Field("_connection").GetValue();
 
-				if (conn != null) {
-					Traverse.Create(conn).Method("Disconnect").GetValue();
-				}
-			} catch { }
+					if (conn != null) {
+						var isConnectedProp = Traverse.Create(conn).Property("IsConnected");
+						if (isConnectedProp.PropertyExists()) {
+							isConnectedProp.SetValue(false);
+						}
+
+						Traverse.Create(conn).Method("Disconnect").GetValue();
+					}
+				} catch { }
+			});
 		}
 	}
 
@@ -586,7 +597,7 @@ public class IWantBabbelite : ResoniteMod {
 						} catch (Exception ex) {
 							string errorMsg = ex.InnerException?.Message ?? ex.Message;
 							Warn($"Error while trying to push audio for {userName}: {errorMsg}");
-							ResetSession(session, world, refId);
+							ResetSession(session, world, refId, true);
 						} finally {
 							lock (_transmitting) { _transmitting.Remove((world, refId)); }
 						}
@@ -738,7 +749,7 @@ public class IWantBabbelite : ResoniteMod {
 							} catch (Exception ex) {
 								string errorMsg = ex.InnerException?.Message ?? ex.Message;
 								Warn($"Error while trying to push silence for {userName}: {errorMsg}");
-								ResetSession(newSession, world, refId);
+								ResetSession(newSession, world, refId, true);
 							} finally {
 								if (lockTaken) {
 									lock (_transmitting) { _transmitting.Remove((world, refId)); }
