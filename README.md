@@ -7,6 +7,24 @@ Currently only tested with transcription.
 ## Screenshots
 <!-- If your mod has visible effects in the game, attach some images or video of it in-use here! Otherwise remove this section -->
 
+## Usage
+The mod exposes Babbelite's output through a few Dynamic Variables:
+
+(**string**) `User/Babbelite.Transcription`: The result of the transcription chunk.
+
+(**bool**) `User/Babbelite.IsCompleted`: Whether the transcription is considered 'complete'. When false, it represents a partial transcription.
+
+(**float**) `User/Babbelite.Confidence`: How 'confident' the model is that the output is correct, in a range from 0 to 1.
+
+(**string**) `User/Babbelite.Language`: The predicted language code for the transcription. (e.g. `en` for English)
+
+The variables are attached to each User's Root Slot.
+
+> [!IMPORTANT]
+> Other users won't be able to read these variables, they are clientsided. You'll have to write the output somewhere manually if you want it to be networked.
+>
+> However, users of the mod can enable the "Expose to world" option. This allows the local user's *personal* transcription to be accessed by anyone in the session. Transcriptions of people who don't have the mod will always be local.
+
 ## Installing the Babbelite server
 1. Clone the [Babbelite source code.](https://github.com/Yellow-Dog-Man/Babbelite).
 2. Build the project, usually using some form of [Visual Studio](https://visualstudio.microsoft.com/downloads/) or `dotnet`.
