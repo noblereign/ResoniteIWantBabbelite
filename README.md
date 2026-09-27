@@ -41,7 +41,7 @@ The variables are attached to each User's Root Slot.
 > 
 > You can get the Silero VAD onnx from [this GitHub repo](https://github.com/snakers4/silero-vad/blob/master/src/silero_vad/data/silero_vad.onnx).
 > 
-> For Whisper, you specifically need the Whisper.NET flavor of it. There's a friendly interface to browse them [here](https://huggingface.co/sandrohanea/whisper.net/tree/main), but I've personally had more luck downloading them from [the URLS in EchoSharp's source code](https://github.com/Yellow-Dog-Man/echosharp/blob/main/components/EchoSharp.Whisper.net/WhisperNetModels.cs).
+> For Whisper, you specifically need the Whisper.NET flavor of it. There's a friendly interface to browse them [here](https://huggingface.co/sandrohanea/whisper.net/tree/main), but I've personally had more luck downloading them from [the URLs in EchoSharp's source code](https://github.com/Yellow-Dog-Man/echosharp/blob/main/components/EchoSharp.Whisper.net/WhisperNetModels.cs).
 5. Place those models near the server executable, e.g. in a folder named `models`.
 6. Create a `config.json` next to the server executable.
 
