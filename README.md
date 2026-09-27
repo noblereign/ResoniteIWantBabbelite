@@ -5,7 +5,12 @@ A [ResoniteModLoader](https://github.com/resonite-modding-group/ResoniteModLoade
 Currently only tested with transcription.
 
 ## Screenshots
-<!-- If your mod has visible effects in the game, attach some images or video of it in-use here! Otherwise remove this section -->
+
+https://github.com/user-attachments/assets/5eb551f1-85ad-47b8-b719-701a895d0f09
+
+<img width="1550" height="872" alt="Discord_114932" src="https://github.com/user-attachments/assets/8abe90e9-eff5-4e8f-8e1a-65337f835352" />
+
+<img width="979" height="512" alt="LosslessCut_114930" src="https://github.com/user-attachments/assets/6413ef48-1300-4a4e-8924-0bc8859f0e69" />
 
 ## Usage
 The mod exposes Babbelite's output through a few Dynamic Variables:
@@ -20,7 +25,7 @@ The mod exposes Babbelite's output through a few Dynamic Variables:
 
 The variables are attached to each User's Root Slot.
 
-> [!IMPORTANT]
+> [!NOTE]
 > Other users won't be able to read these variables, they are clientsided. You'll have to write the output somewhere manually if you want it to be networked.
 >
 > However, users of the mod can enable the "Expose to world" option. This allows the local user's *personal* transcription to be accessed by anyone in the session. Transcriptions of people who don't have the mod will always be local.
@@ -30,7 +35,8 @@ The variables are attached to each User's Root Slot.
 2. Build the project, usually using some form of [Visual Studio](https://visualstudio.microsoft.com/downloads/) or `dotnet`.
 3. After building, you should have the Babbelite server executable (`Babbelite.Server.CLI.exe`) at or near `Babbelite\Babbelite.Server.CLI\bin\Release\net10.0`.
 4. Download the necessary models.
-> 
+
+> [!IMPORTANT]
 > Babbelite requires Silero VAD and OpenAI Whisper for transcription.
 > 
 > You can get the Silero VAD onnx from [this GitHub repo](https://github.com/snakers4/silero-vad/blob/master/src/silero_vad/data/silero_vad.onnx).
@@ -38,8 +44,9 @@ The variables are attached to each User's Root Slot.
 > For Whisper, you specifically need the Whisper.NET flavor of it. There's a friendly interface to browse them [here](https://huggingface.co/sandrohanea/whisper.net/tree/main), but I've personally had more luck downloading them from [the URLS in EchoSharp's source code](https://github.com/Yellow-Dog-Man/echosharp/blob/main/components/EchoSharp.Whisper.net/WhisperNetModels.cs).
 5. Place those models near the server executable, e.g. in a folder named `models`.
 6. Create a `config.json` next to the server executable.
-> 
-> Example config file:
+
+> [!TIP]
+> An example config file:
 > ```json
 > {
 >   "serverName": "My Babbelite Server",
@@ -54,6 +61,7 @@ The variables are attached to each User's Root Slot.
 >   }
 > }
 > ```
+
 7. It should be ready by now, go ahead and launch `Babbelite.Server.CLI.exe`! If all goes well, the log output should look like this:
 >
 > Loading Config.json
