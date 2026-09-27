@@ -39,7 +39,7 @@ public class IWantBabbelite : ResoniteMod {
 	public static readonly ModConfigurationKey<bool> TranscribeRemoteUsers = new("Transcribe remote users", "Should the mod process and transcribe other users locally? This can incur heavy VRAM costs.", () => false);
 
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<bool> TranscribeLocalMuted = new("Transcribe locally muted users", "Should users muted through the Session tab still be transcribed?", () => false);
+	public static readonly ModConfigurationKey<bool> TranscribeLocalMuted = new("Transcribe locally muted users", "Should users muted through the Interactive Camera still be transcribed?", () => false);
 
 	private static BabbeliteClient? _babbeliteManager;
 	private static readonly Dictionary<(World World, RefID RefID), LiveTranscriptionSession> _userSessions = [];
