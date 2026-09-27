@@ -553,6 +553,7 @@ public class IWantBabbelite : ResoniteMod {
 
 	private static void ProcessAudio(User user, float[] audioData, int count, int sourceSampleRate) {
 		if (!Config!.GetValue(Enabled)) return;
+		if (!Config!.GetValue(TranscribeRemoteUsers) && !user.IsLocalUser) return;
 
 		RefID refId = user.ReferenceID;
 		World world = user.World;
