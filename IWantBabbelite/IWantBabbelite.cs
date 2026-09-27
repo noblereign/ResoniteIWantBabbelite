@@ -54,7 +54,7 @@ public class IWantBabbelite : ResoniteMod {
 	private static readonly Dictionary<(World World, RefID RefID), AvatarAudioOutputManager?> _audioManagers = [];
 
 	const string SLOT_NAME = "Babbelite";
-	private static readonly SearchValues<string> Hallucinations = SearchValues.Create(["(silence)", "*mimics a video*", "[Buzzer]", "[BLANK_AUDIO]", "[silence]", "[no audio]", "[XBOX NOISE]"], StringComparison.OrdinalIgnoreCase);
+	private static readonly SearchValues<string> Hallucinations = SearchValues.Create(["(silence)", "*mimics a video*", "[Buzzer]", "[BLANK_AUDIO]", "[silence]", "[no audio]", "[XBOX NOISE]", "[XBOX SOUND]"], StringComparison.OrdinalIgnoreCase);
 	private static float GetDefaultMaxDistance(VoiceMode mode) => mode switch {
 		VoiceMode.Broadcast => 100000f,
 		VoiceMode.Shout => 100f,
@@ -468,15 +468,16 @@ public class IWantBabbelite : ResoniteMod {
 		return output;
 	}
 
-	private static async Task PushAudioWithTimeout(LiveTranscriptionSession session, float[] chunk) {
+	private static async Task<bool> PushAudioWithTimeout(LiveTranscriptionSession session, float[] chunk) {
 		Task pushTask = session.PushAudioData(chunk);
-		Task timeoutTask = Task.Delay(2000);
+		Task timeoutTask = Task.Delay(5000);
 
 		if (await Task.WhenAny(pushTask, timeoutTask) == timeoutTask) {
-			throw new TimeoutException("The server isn't responding!");
+			return false;
 		}
 
 		await pushTask;
+		return true;
 	}
 
 	private static AvatarAudioOutputManager? GetAudioManager(User user) {
@@ -567,6 +568,8 @@ public class IWantBabbelite : ResoniteMod {
 			float[] resampled = ResampleAudio(audioData, count, sourceSampleRate, session.SampleRate);
 			if (resampled == null || resampled.Length == 0) return;
 
+			lock (_lastHeardFrom) { _lastHeardFrom[(world, refId)] = DateTime.UtcNow; }
+
 			lock (_audioAccumulators) {
 				if (!_audioAccumulators.TryGetValue((world, refId), out List<float>? accumulator)) {
 					accumulator = new List<float>(SILERO_CHUNK_SIZE * 4);
@@ -575,8 +578,11 @@ public class IWantBabbelite : ResoniteMod {
 
 				accumulator.AddRange(resampled);
 
-				while (accumulator.Count >= SILERO_CHUNK_SIZE) {
+				if (accumulator.Count > session.SampleRate*2) {
+					accumulator.RemoveRange(0, accumulator.Count - (SILERO_CHUNK_SIZE * 4));
+				}
 
+				if (accumulator.Count >= SILERO_CHUNK_SIZE) {
 					bool lockTaken = false;
 					lock (_transmitting) {
 						if (!_transmitting.Contains((world, refId))) {
@@ -585,24 +591,31 @@ public class IWantBabbelite : ResoniteMod {
 						}
 					}
 
-					if (!lockTaken) break;
-
-					lock (_lastHeardFrom) { _lastHeardFrom[(world, refId)] = DateTime.UtcNow; }
-
-					float[] chunkToPush = [.. accumulator.GetRange(0, SILERO_CHUNK_SIZE)];
-					accumulator.RemoveRange(0, SILERO_CHUNK_SIZE);
-
-					_ = Task.Run(async () => {
-						try {
-							await PushAudioWithTimeout(session, chunkToPush);
-						} catch (Exception ex) {
-							string errorMsg = ex.InnerException?.Message ?? ex.Message;
-							Warn($"Error while trying to push audio for {userName}: {errorMsg}");
-							ResetSession(session, world, refId, true);
-						} finally {
-							lock (_transmitting) { _transmitting.Remove((world, refId)); }
+					if (lockTaken) {
+						List<float[]> chunksToPush = new();
+						while (accumulator.Count >= SILERO_CHUNK_SIZE) {
+							chunksToPush.Add([.. accumulator.GetRange(0, SILERO_CHUNK_SIZE)]);
+							accumulator.RemoveRange(0, SILERO_CHUNK_SIZE);
 						}
-					});
+
+						_ = Task.Run(async () => {
+							try {
+								foreach (var chunk in chunksToPush) {
+									bool success = await PushAudioWithTimeout(session, chunk);
+									if (!success) {
+										Warn($"Audio push timed out for {userName}!");
+										break;
+									}
+								}
+							} catch (Exception ex) {
+								string errorMsg = ex.InnerException?.Message ?? ex.Message;
+								Warn($"Error while trying to push audio for {userName}: {errorMsg}");
+								ResetSession(session, world, refId);
+							} finally {
+								lock (_transmitting) { _transmitting.Remove((world, refId)); }
+							}
+						});
+					}
 				}
 			}
 
@@ -731,10 +744,13 @@ public class IWantBabbelite : ResoniteMod {
 						lock (_lastHeardFrom) {
 							if (!_lastHeardFrom.TryGetValue((world, refId), out lastAudio)) {
 								lastAudio = DateTime.UtcNow;
+								lock (_lastHeardFrom) { _lastHeardFrom[(world, refId)] = DateTime.UtcNow; }
 							}
 						}
 
-						if ((DateTime.UtcNow - lastAudio).TotalMilliseconds > 150) {
+						double timeSinceLastAudio = (DateTime.UtcNow - lastAudio).TotalMilliseconds;
+
+						if (timeSinceLastAudio > 150 && timeSinceLastAudio < 1000) {
 							bool lockTaken = false;
 							try {
 								lock (_transmitting) {
@@ -745,12 +761,15 @@ public class IWantBabbelite : ResoniteMod {
 								}
 
 								if (lockTaken) {
-									await PushAudioWithTimeout(newSession, silentChunk);
+									bool success = await PushAudioWithTimeout(newSession, silentChunk);
+									if (!success) {
+										Warn($"Silence push timed out for {userName}.");
+									}
 								}
 							} catch (Exception ex) {
 								string errorMsg = ex.InnerException?.Message ?? ex.Message;
 								Warn($"Error while trying to push silence for {userName}: {errorMsg}");
-								ResetSession(newSession, world, refId, true);
+								ResetSession(newSession, world, refId);
 							} finally {
 								if (lockTaken) {
 									lock (_transmitting) { _transmitting.Remove((world, refId)); }
