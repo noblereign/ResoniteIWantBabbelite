@@ -1,13 +1,14 @@
-﻿using FrooxEngine;
-using HarmonyLib;
-using ResoniteModLoader;
-using Elements.Assets;
-using Elements.Core;
+﻿using System.Buffers;
+using System.Net.WebSockets;
 using Babbelite.Client;
 using Babbelite.Shared;
-using System.Net.WebSockets;
-using System.Buffers;
+using Elements.Assets;
+using Elements.Core;
+using FrooxEngine;
 using FrooxEngine.CommonAvatar;
+using HarmonyLib;
+using ResoniteModLoader;
+
 
 #if DEBUG
 using ResoniteHotReloadLib;
@@ -26,8 +27,15 @@ public class IWantBabbelite : ResoniteMod {
 
 	private static ModConfiguration? Config;
 
+	public enum WhisperBubblePlan {
+		PauseAll,
+		PauseAllInRemote,
+		PauseExcludingSelf,
+		DontPause
+	}
+
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<bool> Enabled = new("Enabled", "Enables the mod.", () => true);
+	public static readonly ModConfigurationKey<bool> Enabled = new("Enabled", "Enables the mod. If the mod gets stuck (e.g. the Babbelite server crashed), you can try toggling this off and on to reset the client.", () => true);
 
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<bool> ExposeToWorld = new("Expose to world", "Makes your personal transcription global for anyone to read, even without the mod.", () => false);
@@ -41,6 +49,9 @@ public class IWantBabbelite : ResoniteMod {
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<bool> TranscribeLocalMuted = new("Transcribe locally muted users", "Should users muted through the Interactive Camera still be transcribed?", () => false);
 
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<WhisperBubblePlan> PauseInWhisperBubbles = new("Pause in whisper bubbles", "When should transcriptions be paused?\n\n<color=hero.red><b>WARNING:</color> Lowering this setting comes with risks to privacy.</b> Consider how each option may affect you, as well as the people around you.\n\n<color=hero.yellow>PauseAll</color>: When inside any whisper bubble.\n\n<color=hero.yellow>PauseAllInRemote</color>: Only inside other users whisper bubbles.\n\n<color=hero.yellow>PauseExcludingSelf</color>: When inside any whisper bubble, but always keep transcribing yourself.\n\n<color=hero.yellow>DontPause</color>: Never pause, just keep transcribing regardless of the context.", () => WhisperBubblePlan.PauseAll);
+
 	private static BabbeliteClient? _babbeliteManager;
 	private static readonly Dictionary<(World World, RefID RefID), LiveTranscriptionSession> _userSessions = [];
 	private static readonly HashSet<(World World, RefID RefID)> _pendingSessions = [];
@@ -52,6 +63,8 @@ public class IWantBabbelite : ResoniteMod {
 	private const int SILERO_CHUNK_SIZE = 512;
 
 	private static readonly Dictionary<(World World, RefID RefID), AvatarAudioOutputManager?> _audioManagers = [];
+	private static int _inWhisperBubble = 0;
+	private static int _inRemoteWhisperBubble = 0;
 
 	const string SLOT_NAME = "Babbelite";
 	private static readonly SearchValues<string> Hallucinations = SearchValues.Create(["(silence)", "*mimics a video*", "[Buzzer]", "[BLANK_AUDIO]", "[silence]", "[no audio]", "[XBOX NOISE]", "[XBOX SOUND]"], StringComparison.OrdinalIgnoreCase);
@@ -72,6 +85,7 @@ public class IWantBabbelite : ResoniteMod {
 			Msg("Initializing BabbeliteClient...");
 			_babbeliteManager = new BabbeliteClient(false);
 			DiscoveryAtHome();
+			BubbleTrackingLoop();
 		}
 
 		Config = GetConfiguration()!;
@@ -107,6 +121,33 @@ public class IWantBabbelite : ResoniteMod {
 	}
 #endif
 
+	private static void BubbleTrackingLoop() {
+		Task.Run(async () => {
+			while (true) {
+				await Task.Delay(500);
+
+				try {
+					bool currentlyInBubble = false;
+					bool currentlyInRemoteBubble = false;
+					World world = Engine.Current.WorldManager.FocusedWorld;
+
+					foreach (User targetUser in world.AllUsers) {
+						if (targetUser.ActiveVoiceMode == VoiceMode.Whisper) {
+							float radius = GetAudioManager(targetUser)?.GetConfig(VoiceMode.Whisper)?.MaxDistance.Value ?? GetDefaultMaxDistance(VoiceMode.Whisper);
+							if (targetUser.DistanceToLocalUserHead <= radius) {
+								currentlyInBubble = true;
+								currentlyInRemoteBubble = currentlyInRemoteBubble || !targetUser.IsLocalUser;
+							}
+						}
+					}
+
+					Interlocked.Exchange(ref _inWhisperBubble, currentlyInBubble ? 1 : 0);
+					Interlocked.Exchange(ref _inRemoteWhisperBubble, currentlyInRemoteBubble ? 1 : 0);
+				} catch { }
+			}
+		});
+	}
+
 	private static void ResetState() {
 		Msg("Resetting babbelite state");
 		lock (_userSessions) {
@@ -123,6 +164,8 @@ public class IWantBabbelite : ResoniteMod {
 		lock (_transmitting) { _transmitting.Clear(); }
 		lock (_lastHeardFrom) { _lastHeardFrom.Clear(); }
 		lock (_audioManagers) { _audioManagers.Clear(); }
+		Interlocked.Exchange(ref _inWhisperBubble, 0);
+		Interlocked.Exchange(ref _inRemoteWhisperBubble, 0);
 		if (_babbeliteManager != null) {
 			try {
 				var connectionsList = Traverse.Create(_babbeliteManager).Field<List<BabbeliteConnection>>("_connections").Value;
@@ -556,6 +599,26 @@ public class IWantBabbelite : ResoniteMod {
 		if (!Config!.GetValue(Enabled)) return;
 		if (!Config!.GetValue(TranscribeRemoteUsers) && !user.IsLocalUser) return;
 
+		bool inWhisperBubble = Volatile.Read(ref _inWhisperBubble) == 1;
+		bool inRemoteWhisperBubble = Volatile.Read(ref _inRemoteWhisperBubble) == 1;
+
+		if (inWhisperBubble) {
+			WhisperBubblePlan plan = Config!.GetValue(PauseInWhisperBubbles);
+
+			switch (plan) {
+				case WhisperBubblePlan.PauseAll:
+					return;
+				case WhisperBubblePlan.PauseAllInRemote:
+					if (inRemoteWhisperBubble) return;
+					break;
+				case WhisperBubblePlan.PauseExcludingSelf:
+					if (!user.IsLocalUser) return;
+					break;
+				case WhisperBubblePlan.DontPause:
+					break;
+			}
+		}
+
 		RefID refId = user.ReferenceID;
 		World world = user.World;
 		string userName = user.UserName;
@@ -592,7 +655,7 @@ public class IWantBabbelite : ResoniteMod {
 					}
 
 					if (lockTaken) {
-						List<float[]> chunksToPush = new();
+						List<float[]> chunksToPush = [];
 						while (accumulator.Count >= SILERO_CHUNK_SIZE) {
 							chunksToPush.Add([.. accumulator.GetRange(0, SILERO_CHUNK_SIZE)]);
 							accumulator.RemoveRange(0, SILERO_CHUNK_SIZE);
