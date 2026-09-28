@@ -15,15 +15,17 @@ https://github.com/user-attachments/assets/5eb551f1-85ad-47b8-b719-701a895d0f09
 ## Usage
 The mod exposes Babbelite's output through a few Dynamic Variables:
 
-(**string**) `User/Babbelite.Transcription`: The result of the transcription chunk.
+(**string**) `Babbelite.Transcription`: The result of the transcription chunk.
 
-(**bool**) `User/Babbelite.IsCompleted`: Whether the transcription is considered 'complete'. When false, it represents a partial transcription.
+(**bool**) `Babbelite.IsCompleted`: Whether the transcription is considered 'complete'. When false, it represents a partial transcription.
 
-(**float**) `User/Babbelite.Confidence`: How 'confident' the model is that the output is correct, in a range from 0 to 1.
+(**float**) `Babbelite.Confidence`: How 'confident' the model is that the output is correct, in a range from 0 to 1.
 
-(**string**) `User/Babbelite.Language`: The predicted language code for the transcription. (e.g. `en` for English)
+(**string**) `Babbelite.Language`: The predicted language code for the transcription. (e.g. `en` for English)
 
-The variables are attached to each User's Root Slot.
+The variables are attached to each player's User Root, under the `User/` dynamic variable space.
+
+In Userspace, they're attached to the world root, under the `World/` dynamic variable space.
 
 > [!NOTE]
 > Other users won't be able to read these variables, they are clientsided. You'll have to write the output somewhere manually if you want it to be networked.

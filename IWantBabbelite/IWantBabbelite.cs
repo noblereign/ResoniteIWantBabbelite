@@ -52,6 +52,9 @@ public class IWantBabbelite : ResoniteMod {
 	[AutoRegisterConfigKey]
 	public static readonly ModConfigurationKey<WhisperBubblePlan> PauseInWhisperBubbles = new("Pause in whisper bubbles", "When should transcriptions be paused?\n\n<color=hero.red><b>WARNING:</color> Lowering this setting comes with risks to privacy.</b> Consider how each option may affect you, as well as the people around you.\n\n<color=hero.yellow>PauseAll</color>: When inside any whisper bubble.\n\n<color=hero.yellow>PauseAllInRemote</color>: Only inside other users whisper bubbles.\n\n<color=hero.yellow>PauseExcludingSelf</color>: When inside any whisper bubble, but always keep transcribing yourself.\n\n<color=hero.yellow>DontPause</color>: Never pause, just keep transcribing regardless of the context.", () => WhisperBubblePlan.PauseAll);
 
+	[AutoRegisterConfigKey]
+	public static readonly ModConfigurationKey<bool> UserspaceIgnoresPauses = new("Ignore pausing in Userspace", "Should your transcription still be passed into Userspace, regardless of the whisper bubble pause?", () => true);
+
 	private static BabbeliteClient? _babbeliteManager;
 	private static readonly Dictionary<(World World, RefID RefID), LiveTranscriptionSession> _userSessions = [];
 	private static readonly HashSet<(World World, RefID RefID)> _pendingSessions = [];
@@ -66,8 +69,9 @@ public class IWantBabbelite : ResoniteMod {
 	private static int _inWhisperBubble = 0;
 	private static int _inRemoteWhisperBubble = 0;
 
+	private static Slot? userspaceSlot = null;
 	const string SLOT_NAME = "Babbelite";
-	private static readonly SearchValues<string> Hallucinations = SearchValues.Create(["(silence)", "*mimics a video*", "[Buzzer]", "[BLANK_AUDIO]", "[silence]", "[no audio]", "[XBOX NOISE]", "[XBOX SOUND]"], StringComparison.OrdinalIgnoreCase);
+	private static readonly SearchValues<string> Hallucinations = SearchValues.Create(["(silence)", "*mimics a video*", "[Buzzer]", "[BLANK_AUDIO]", "[silence]", "[no audio]", "[XBOX NOISE]", "[XBOX SOUND]", "(Buzz)", "(Buzzer)", "[Buzz]", "*mimics*", "[mimics]", "(mimics)"], StringComparison.OrdinalIgnoreCase);
 	private static float GetDefaultMaxDistance(VoiceMode mode) => mode switch {
 		VoiceMode.Broadcast => 100000f,
 		VoiceMode.Shout => 100f,
@@ -594,30 +598,75 @@ public class IWantBabbelite : ResoniteMod {
 			}
 		} catch { }
 	}
+	
+	private static DynamicValueVariable<T> GetOrAddVar<T>(Slot slot, string varName) {
+		var dynVar = slot.GetComponent<DynamicValueVariable<T>>(v => v.VariableName.Value == varName);
+		if (dynVar == null) {
+			dynVar = slot.AttachComponent<DynamicValueVariable<T>>();
+			dynVar.VariableName.Value = varName;
+		}
+		return dynVar;
+	}
 
-	private static void ProcessAudio(User user, float[] audioData, int count, int sourceSampleRate) {
-		if (!Config!.GetValue(Enabled)) return;
-		if (!Config!.GetValue(TranscribeRemoteUsers) && !user.IsLocalUser) return;
-
+	private static (bool result, bool transcriptionIsUserspaceOnly) IsAudioProcessingAllowed(User user) {
 		bool inWhisperBubble = Volatile.Read(ref _inWhisperBubble) == 1;
 		bool inRemoteWhisperBubble = Volatile.Read(ref _inRemoteWhisperBubble) == 1;
+		bool allowUserspaceTranscription = Config!.GetValue(UserspaceIgnoresPauses);
+		bool transcriptionIsUserspaceOnly = false;
 
 		if (inWhisperBubble) {
 			WhisperBubblePlan plan = Config!.GetValue(PauseInWhisperBubbles);
 
 			switch (plan) {
 				case WhisperBubblePlan.PauseAll:
-					return;
+					if (allowUserspaceTranscription && user.IsLocalUser) {
+						transcriptionIsUserspaceOnly = true;
+						break;
+					}
+					return (false, transcriptionIsUserspaceOnly);
 				case WhisperBubblePlan.PauseAllInRemote:
-					if (inRemoteWhisperBubble) return;
+					if (allowUserspaceTranscription && user.IsLocalUser) {
+						transcriptionIsUserspaceOnly = true;
+						break;
+					}
+					if (inRemoteWhisperBubble) return (false, transcriptionIsUserspaceOnly);
 					break;
 				case WhisperBubblePlan.PauseExcludingSelf:
-					if (!user.IsLocalUser) return;
+					if (!user.IsLocalUser) return (false, transcriptionIsUserspaceOnly);
 					break;
 				case WhisperBubblePlan.DontPause:
 					break;
 			}
 		}
+		return (true, transcriptionIsUserspaceOnly);
+	}
+
+	static void WriteUserspaceTranscription(string text, bool completed, float? confidence, string language) {
+		string trimmed = text.Trim();
+		if (Config!.GetValue(Filter)) {
+			if (Hallucinations.Contains(trimmed)) return;
+			if (trimmed.Contains("*mimic") || trimmed.Contains("[mimic") || trimmed.Contains("(mimic")) return;
+			if (trimmed.Contains("*imitat") || trimmed.Contains("[imitat") || trimmed.Contains("(imitat")) return;
+		}
+
+		Userspace.UserspaceWorld.RunSynchronously(() => {
+			userspaceSlot ??= Userspace.UserspaceWorld.RootSlot.FindChildOrAdd(SLOT_NAME);
+			DynamicValueVariable<string> textVar = GetOrAddVar<string>(userspaceSlot, "World/Babbelite.Transcription");
+			DynamicValueVariable<bool> isCompletedVar = GetOrAddVar<bool>(userspaceSlot, "World/Babbelite.IsCompleted");
+			DynamicValueVariable<float> confidenceVar = GetOrAddVar<float>(userspaceSlot, "World/Babbelite.Confidence");
+			DynamicValueVariable<string> languageVar = GetOrAddVar<string>(userspaceSlot, "World/Babbelite.Language");
+
+			DynamicVariableHelper.WriteDynamicVariable(userspaceSlot, "World/Babbelite.Transcription", trimmed);
+			DynamicVariableHelper.WriteDynamicVariable(userspaceSlot, "World/Babbelite.IsCompleted", completed);
+			DynamicVariableHelper.WriteDynamicVariable(userspaceSlot, "World/Babbelite.Confidence", confidence ?? 1f);
+			DynamicVariableHelper.WriteDynamicVariable(userspaceSlot, "World/Babbelite.Language", language);
+		});
+	}
+
+	private static void ProcessAudio(User user, float[] audioData, int count, int sourceSampleRate) {
+		if (!Config!.GetValue(Enabled)) return;
+		if (!Config!.GetValue(TranscribeRemoteUsers) && !user.IsLocalUser) return;
+		if (!IsAudioProcessingAllowed(user).result) return;
 
 		RefID refId = user.ReferenceID;
 		World world = user.World;
@@ -709,31 +758,37 @@ public class IWantBabbelite : ResoniteMod {
 							try {
 								User targetUser = world.GetUserByAllocationID(allocationId);
 								if (targetUser != null) {
+									(bool audioProcessingAllowed, bool transcriptionIsUserspaceOnly) = IsAudioProcessingAllowed(user);
+									if (!audioProcessingAllowed) return;
+
 									Slot? globalBabbeliteSlot = targetUser.Root.Slot.FindChild(SLOT_NAME);
 									Slot? localBabbeliteSlot = targetUser.Root.Slot.FindLocalChild(SLOT_NAME);
 
 									bool exposeToWorld = Config!.GetValue(ExposeToWorld);
 
 									if (targetUser.IsLocalUser) {
-										if (exposeToWorld) { // exposing self transcription to world
-											if (localBabbeliteSlot != null) {
-												localBabbeliteSlot.Destroy();
-												localBabbeliteSlot = null;
+										if (!transcriptionIsUserspaceOnly) {
+											if (exposeToWorld) { // exposing self transcription to world
+												if (localBabbeliteSlot != null) {
+													localBabbeliteSlot.Destroy();
+													localBabbeliteSlot = null;
+												}
+
+												globalBabbeliteSlot ??= targetUser.Root.Slot.AddSlot(SLOT_NAME, false);
+
+												WriteTranscription(globalBabbeliteSlot, transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
+											} else { // keeping self transcription local
+												if (globalBabbeliteSlot != null) {
+													globalBabbeliteSlot.Destroy();
+													globalBabbeliteSlot = null;
+												}
+
+												localBabbeliteSlot ??= targetUser.Root.Slot.FindLocalChildOrAdd(SLOT_NAME);
+
+												WriteTranscription(localBabbeliteSlot, transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
 											}
-
-											globalBabbeliteSlot ??= targetUser.Root.Slot.AddSlot(SLOT_NAME);
-
-											WriteTranscription(globalBabbeliteSlot, transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
-										} else { // keeping self transcription local
-											if (globalBabbeliteSlot != null) {
-												globalBabbeliteSlot.Destroy();
-												globalBabbeliteSlot = null;
-											}
-
-											localBabbeliteSlot ??= targetUser.Root.Slot.FindLocalChildOrAdd(SLOT_NAME);
-
-											WriteTranscription(localBabbeliteSlot, transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
 										}
+										WriteUserspaceTranscription(transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
 									} else { // other players
 										if (globalBabbeliteSlot != null) { // this user has the mod and is exposing their babbelite slot
 											localBabbeliteSlot?.Destroy();
@@ -767,21 +822,14 @@ public class IWantBabbelite : ResoniteMod {
 										string trimmed = text.Trim();
 										if (Config!.GetValue(Filter)) {
 											if (Hallucinations.Contains(trimmed)) return;
+											if (trimmed.Contains("*mimic") || trimmed.Contains("[mimic") || trimmed.Contains("(mimic")) return;
+											if (trimmed.Contains("*imitat") || trimmed.Contains("[imitat") || trimmed.Contains("(imitat")) return;
 										}
 
-										DynamicValueVariable<T> GetOrAddVar<T>(string varName) {
-											var dynVar = slot.GetComponent<DynamicValueVariable<T>>(v => v.VariableName.Value == varName);
-											if (dynVar == null) {
-												dynVar = slot.AttachComponent<DynamicValueVariable<T>>();
-												dynVar.VariableName.Value = varName;
-											}
-											return dynVar;
-										}
-
-										DynamicValueVariable<string> textVar = GetOrAddVar<string>("User/Babbelite.Transcription");
-										DynamicValueVariable<bool> isCompletedVar = GetOrAddVar<bool>("User/Babbelite.IsCompleted");
-										DynamicValueVariable<float> confidenceVar = GetOrAddVar<float>("User/Babbelite.Confidence");
-										DynamicValueVariable<string> languageVar = GetOrAddVar<string>("User/Babbelite.Language");
+										DynamicValueVariable<string> textVar = GetOrAddVar<string>(slot, "User/Babbelite.Transcription");
+										DynamicValueVariable<bool> isCompletedVar = GetOrAddVar<bool>(slot, "User/Babbelite.IsCompleted");
+										DynamicValueVariable<float> confidenceVar = GetOrAddVar<float>(slot, "User/Babbelite.Confidence");
+										DynamicValueVariable<string> languageVar = GetOrAddVar<string>(slot, "User/Babbelite.Language");
 
 										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Transcription", trimmed);
 										DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.IsCompleted", completed);
