@@ -53,7 +53,7 @@ public class IWantBabbelite : ResoniteMod {
 	public static readonly ModConfigurationKey<WhisperBubblePlan> PauseInWhisperBubbles = new("Pause in whisper bubbles", "When should transcriptions be paused?\n\n<color=hero.red><b>WARNING:</color> Lowering this setting comes with risks to privacy.</b> Consider how each option may affect you, as well as the people around you.\n\n<color=hero.yellow>PauseAll</color>: When inside any whisper bubble.\n\n<color=hero.yellow>PauseAllInRemote</color>: Only inside other users whisper bubbles.\n\n<color=hero.yellow>PauseExcludingSelf</color>: When inside any whisper bubble, but always keep transcribing yourself.\n\n<color=hero.yellow>DontPause</color>: Never pause, just keep transcribing regardless of the context.", () => WhisperBubblePlan.PauseAll);
 
 	[AutoRegisterConfigKey]
-	public static readonly ModConfigurationKey<bool> UserspaceIgnoresPauses = new("Ignore pausing in Userspace", "Should your transcription still be passed into Userspace, regardless of the whisper bubble pause?", () => true);
+	public static readonly ModConfigurationKey<bool> UserspaceIgnoresPauses = new("Ignore pausing in Userspace", "Should your transcription still be passed on to Userspace, regardless of the whisper bubble pause?", () => true);
 
 	private static BabbeliteClient? _babbeliteManager;
 	private static readonly Dictionary<(World World, RefID RefID), LiveTranscriptionSession> _userSessions = [];
