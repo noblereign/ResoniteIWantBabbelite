@@ -386,7 +386,7 @@ public class IWantBabbelite : ResoniteMod {
 				GetOrAddVar<float>(slot, "User/Babbelite.Confidence");
 				GetOrAddVar<string>(slot, "User/Babbelite.Language");
 
-				DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Transcription", string.Empty);
+				DynamicVariableHelper.WriteDynamicVariable<string>(slot, "User/Babbelite.Transcription", null!);
 				DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.IsCompleted", true);
 				DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Confidence", 1f);
 				DynamicVariableHelper.WriteDynamicVariable(slot, "User/Babbelite.Language", "en");
@@ -788,7 +788,7 @@ public class IWantBabbelite : ResoniteMod {
 												globalBabbeliteSlot ??= targetUser.Root.Slot.AddSlot(SLOT_NAME, false);
 
 												if (targetUser.isMuted) {
-													WriteTranscription(globalBabbeliteSlot, string.Empty, true, 1f, "en");
+													WriteTranscription(globalBabbeliteSlot, null!, true, 1f, "en");
 												} else {
 													WriteTranscription(globalBabbeliteSlot, transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
 												}
@@ -800,7 +800,7 @@ public class IWantBabbelite : ResoniteMod {
 
 												localBabbeliteSlot ??= targetUser.Root.Slot.FindLocalChildOrAdd(SLOT_NAME);
 												if (targetUser.isMuted) {
-													WriteTranscription(localBabbeliteSlot, string.Empty, true, 1f, "en");
+													WriteTranscription(localBabbeliteSlot, null!, true, 1f, "en");
 												} else {
 													WriteTranscription(localBabbeliteSlot, transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
 												}
@@ -809,7 +809,7 @@ public class IWantBabbelite : ResoniteMod {
 										if (userspaceIgnoresPauses || currentVoiceMode != VoiceMode.Mute) {
 											WriteUserspaceTranscription(transcription.Text, transcription.IsCompleted, transcription.ConfidenceLevel, transcription.LanguageCode);
 										} else {
-											WriteUserspaceTranscription(string.Empty, true, 1f, "en");
+											WriteUserspaceTranscription(null!, true, 1f, "en");
 										}
 									} else { // other players
 										if (globalBabbeliteSlot != null) { // this user has the mod and is exposing their babbelite slot
@@ -818,7 +818,7 @@ public class IWantBabbelite : ResoniteMod {
 											localBabbeliteSlot ??= targetUser.Root.Slot.FindLocalChildOrAdd(SLOT_NAME);
 
 											if (targetUser.isMuted) {
-												WriteTranscription(localBabbeliteSlot, string.Empty, true, 1f, "en");
+												WriteTranscription(localBabbeliteSlot, null!, true, 1f, "en");
 											} else {
 												// check if theyre within hearing range
 												ViewReferenceController? viewRefController = targetUser.Root.GetRegisteredComponent<ViewReferenceController>();
