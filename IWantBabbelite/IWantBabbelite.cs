@@ -753,7 +753,7 @@ public class IWantBabbelite : ResoniteMod {
 		Task.Run(async () => {
 			try {
 				CleanDeadConnections();
-				LiveTranscriptionSession newSession = await _babbeliteManager!.CreateTranscriptionSession(userId);
+				LiveTranscriptionSession newSession = await _babbeliteManager!.CreateTranscriptionSession($"{userId} @ {world.SessionId}");
 
 				lock (_userSessions) {
 					_userSessions[(world, refId)] = newSession;
