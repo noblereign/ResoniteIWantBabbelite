@@ -681,7 +681,7 @@ public class IWantBabbelite : ResoniteMod {
 		RefID refId = user.ReferenceID;
 		World world = user.World;
 		string userName = user.UserName;
-		string userId = user.UserID;
+		string userId = String.IsNullOrEmpty(user.UserID) ? user.MachineID : user.UserID;
 		byte allocationId = user.AllocationID;
 
 		if (_babbeliteManager == null || _babbeliteManager.ConnectionCount <= 0) return;
