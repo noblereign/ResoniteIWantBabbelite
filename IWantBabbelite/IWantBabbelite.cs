@@ -714,7 +714,8 @@ public class IWantBabbelite : ResoniteMod {
 								foreach (var chunk in chunksToPush) {
 									bool success = await PushAudioWithTimeout(session, chunk);
 									if (!success) {
-										Warn($"Audio push timed out for {userName}!");
+										Warn($"Audio push timed out for {userName}! Is the session dead? Resetting state.");
+										ResetSession(session, world, refId);
 										break;
 									}
 								}
@@ -742,7 +743,14 @@ public class IWantBabbelite : ResoniteMod {
 		Task.Run(async () => {
 			try {
 				CleanDeadConnections();
-				LiveTranscriptionSession newSession = await _babbeliteManager!.CreateTranscriptionSession($"{userId} @ {world.SessionId}");
+				Task<LiveTranscriptionSession> createSessionTask = _babbeliteManager!.CreateTranscriptionSession($"{userId} @ {world.SessionId}");
+				Task timeoutTask = Task.Delay(10000);
+
+				if (await Task.WhenAny(createSessionTask, timeoutTask) == timeoutTask) {
+					throw new TimeoutException($"Timeout while trying to create a transcription session for {userId} @ {world.SessionId}");
+				}
+
+				LiveTranscriptionSession newSession = await createSessionTask;
 
 				lock (_userSessions) {
 					_userSessions[(world, refId)] = newSession;
@@ -857,46 +865,53 @@ public class IWantBabbelite : ResoniteMod {
 				};
 
 				_ = Task.Run(async () => {
-					float[] silentChunk = new float[SILERO_CHUNK_SIZE];
-					while (!newSession.IsDisposed) {
-						await Task.Delay(32);
+					try {
+						float[] silentChunk = new float[SILERO_CHUNK_SIZE];
+						while (!newSession.IsDisposed) {
+							await Task.Delay(32);
 
-						DateTime lastAudio;
-						lock (_lastHeardFrom) {
-							if (!_lastHeardFrom.TryGetValue((world, refId), out lastAudio)) {
-								lastAudio = DateTime.UtcNow;
-								lock (_lastHeardFrom) { _lastHeardFrom[(world, refId)] = DateTime.UtcNow; }
-							}
-						}
-
-						double timeSinceLastAudio = (DateTime.UtcNow - lastAudio).TotalMilliseconds;
-
-						if (timeSinceLastAudio > 150 && timeSinceLastAudio < 1000) {
-							bool lockTaken = false;
-							try {
-								lock (_transmitting) {
-									if (!_transmitting.Contains((world, refId))) {
-										_transmitting.Add((world, refId));
-										lockTaken = true;
-									}
-								}
-
-								if (lockTaken) {
-									bool success = await PushAudioWithTimeout(newSession, silentChunk);
-									if (!success) {
-										Warn($"Silence push timed out for {userName}.");
-									}
-								}
-							} catch (Exception ex) {
-								string errorMsg = ex.InnerException?.Message ?? ex.Message;
-								Warn($"Error while trying to push silence for {userName}: {errorMsg}");
-								ResetSession(newSession, world, refId);
-							} finally {
-								if (lockTaken) {
-									lock (_transmitting) { _transmitting.Remove((world, refId)); }
+							DateTime lastAudio;
+							lock (_lastHeardFrom) {
+								if (!_lastHeardFrom.TryGetValue((world, refId), out lastAudio)) {
+									lastAudio = DateTime.UtcNow;
+									lock (_lastHeardFrom) { _lastHeardFrom[(world, refId)] = DateTime.UtcNow; }
 								}
 							}
+
+							double timeSinceLastAudio = (DateTime.UtcNow - lastAudio).TotalMilliseconds;
+
+							if (timeSinceLastAudio > 150 && timeSinceLastAudio < 1000) {
+								bool lockTaken = false;
+								try {
+									lock (_transmitting) {
+										if (!_transmitting.Contains((world, refId))) {
+											_transmitting.Add((world, refId));
+											lockTaken = true;
+										}
+									}
+
+									if (lockTaken) {
+										bool success = await PushAudioWithTimeout(newSession, silentChunk);
+										if (!success) {
+											Warn($"Silence push timed out for {userName}. Is the session dead? Resetting state.");
+											ResetSession(newSession, world, refId);
+											break;
+										}
+									}
+								} catch (Exception ex) {
+									string errorMsg = ex.InnerException?.Message ?? ex.Message;
+									Warn($"Error while trying to push silence for {userName}: {errorMsg}");
+									ResetSession(newSession, world, refId);
+								} finally {
+									if (lockTaken) {
+										lock (_transmitting) { _transmitting.Remove((world, refId)); }
+									}
+								}
+							}
 						}
+					} catch (Exception ex) {
+						Warn($"Silence pusher for {userName} experienced a fatal error: {ex.Message}");
+						ResetSession(newSession, world, refId);
 					}
 				});
 
