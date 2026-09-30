@@ -404,82 +404,71 @@ public class IWantBabbelite : ResoniteMod {
 
 	[HarmonyPatch(typeof(OpusStream<MonoSample>), "OnDispose")]
 	class OpusStream_Dispose_Patch {
-		public static void Postfix(OpusStream<MonoSample> __instance) {
-			User user = __instance.User;
-			if (user != null) {
-				if (_userSessions.TryGetValue((user.World, user.ReferenceID), out var session)) {
-					Msg($"Cleaning up {user.UserName}'s Babbelite session");
-					session.Dispose();
-					lock (_userSessions) {
-						_userSessions.Remove((user.World, user.ReferenceID));
+		public static void Prefix(OpusStream<MonoSample> __instance) {
+			try {
+				User user = __instance.User;
+				if (user != null) {
+					if (_userSessions.TryGetValue((user.World, user.ReferenceID), out var session)) {
+						Msg($"Cleaning up {user.UserName}'s Babbelite session");
+						session.Dispose();
+						lock (_userSessions) {
+							_userSessions.Remove((user.World, user.ReferenceID));
+						}
+					}
+					lock (_pendingSessions) {
+						_pendingSessions.Remove((user.World, user.ReferenceID));
+					}
+					lock (_audioAccumulators) {
+						_audioAccumulators.Remove((user.World, user.ReferenceID));
+					}
+					lock (_lastHeardFrom) {
+						_lastHeardFrom.Remove((user.World, user.ReferenceID));
+					}
+					lock (_transmitting) {
+						_transmitting.Remove((user.World, user.ReferenceID));
+					}
+					lock (_audioManagers) {
+						_audioManagers.Remove((user.World, user.ReferenceID));
 					}
 				}
-				lock (_pendingSessions) {
-					_pendingSessions.Remove((user.World, user.ReferenceID));
-				}
-				lock (_audioAccumulators) {
-					_audioAccumulators.Remove((user.World, user.ReferenceID));
-				}
-				lock (_lastHeardFrom) {
-					_lastHeardFrom.Remove((user.World, user.ReferenceID));
-				}
-				lock (_transmitting) {
-					_transmitting.Remove((user.World, user.ReferenceID));
-				}
-				lock (_audioManagers) {
-					_audioManagers.Remove((user.World, user.ReferenceID));
-				}
+			} catch (Exception ex) {
+				Error($"Babbelite cleanup on OpusStream disposal failed: {ex}");
 			}
 		}
 	}
 
 	[HarmonyPatch(typeof(World), "Dispose")]
 	class World_Dispose_Patch {
-		static void Postfix(World __instance) {
-			HashSet<RefID> userRefs = [];
-			foreach (var user in __instance.AllUsers) {
-				if (user != null) {
-					userRefs.Add(user.ReferenceID);
-				}
-			}
-
-			lock (_userSessions) {
-				foreach (var refId in userRefs) {
-					if (_userSessions.TryGetValue((__instance, refId), out var session)) {
-						session?.Dispose();
-						_userSessions.Remove((__instance, refId));
+		static void Prefix(World __instance) {
+			try {
+				lock (_userSessions) {
+					var keysToRemove = _userSessions.Keys.Where(k => k.World == __instance).ToList();
+					foreach (var key in keysToRemove) {
+						_userSessions[key]?.Dispose();
+						_userSessions.Remove(key);
 					}
 				}
-			}
-
-			lock (_pendingSessions) {
-				foreach (var refId in userRefs) {
-					_pendingSessions.Remove((__instance, refId));
+				lock (_pendingSessions) {
+					_pendingSessions.RemoveWhere(k => k.World == __instance);
 				}
-			}
-
-			lock (_audioAccumulators) {
-				foreach (var refId in userRefs) {
-					_audioAccumulators.Remove((__instance, refId));
+				lock (_transmitting) {
+					_transmitting.RemoveWhere(k => k.World == __instance);
 				}
-			}
-
-			lock (_lastHeardFrom) {
-				foreach (var refId in userRefs) {
-					_lastHeardFrom.Remove((__instance, refId));
+				lock (_audioAccumulators) {
+					var keysToRemove = _audioAccumulators.Keys.Where(k => k.World == __instance).ToList();
+					foreach (var key in keysToRemove) _audioAccumulators.Remove(key);
 				}
-			}
-
-			lock (_transmitting) {
-				foreach (var refId in userRefs) {
-					_transmitting.Remove((__instance, refId));
+				lock (_lastHeardFrom) {
+					var keysToRemove = _lastHeardFrom.Keys.Where(k => k.World == __instance).ToList();
+					foreach (var key in keysToRemove) _lastHeardFrom.Remove(key);
 				}
-			}
-
-			lock (_audioManagers) {
-				foreach (var refId in userRefs) {
-					_audioManagers.Remove((__instance, refId));
+				lock (_audioManagers) {
+					var keysToRemove = _audioManagers.Keys.Where(k => k.World == __instance).ToList();
+					foreach (var key in keysToRemove) _audioManagers.Remove(key);
 				}
+
+			} catch (Exception ex) {
+				Error($"Babbelite cleanup on world disposal failed: {ex}");
 			}
 		}
 	}
