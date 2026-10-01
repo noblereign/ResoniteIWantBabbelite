@@ -103,6 +103,8 @@ public class IWantBabbelite : ResoniteMod {
 		// Patch Harmony
 		Harmony harmony = new(harmonyId);
 		harmony.PatchAll();
+
+		Engine.Current.OnShutdown += OnEngineShutdown;
 	}
 
 #if DEBUG
@@ -111,6 +113,7 @@ public class IWantBabbelite : ResoniteMod {
 		// Unpatch Harmony
 		Harmony harmony = new(harmonyId);
 		harmony.UnpatchAll(harmonyId);
+		Engine.Current.OnShutdown -= OnEngineShutdown;
 		ResetState();
 	}
 
@@ -125,9 +128,17 @@ public class IWantBabbelite : ResoniteMod {
 	}
 #endif
 
+	private static void OnEngineShutdown() {
+		Engine.Current.RegisterShutdownTask(Task.Run(async () => {
+			Msg("Engine is shutting down. Cleaning up Babbelite connections...");
+			ResetState();
+			await Task.Delay(250);
+		}));
+	}
+
 	private static void BubbleTrackingLoop() {
 		Task.Run(async () => {
-			while (true) {
+			while (!Engine.Current.IsShuttingDown) {
 				await Task.Delay(500);
 
 				try {
@@ -154,34 +165,38 @@ public class IWantBabbelite : ResoniteMod {
 
 	private static void ResetState() {
 		Msg("Resetting babbelite state");
-		lock (_userSessions) {
-			foreach (LiveTranscriptionSession session in _userSessions.Values) {
-				_ = Task.Run(() => {
-					try { session?.Dispose(); } catch { }
-				});
-			}
-
-			_userSessions.Clear(); 
-		}
-		lock (_pendingSessions) { _pendingSessions.Clear(); }
-		lock (_audioAccumulators) { _audioAccumulators.Clear(); }
-		lock (_transmitting) { _transmitting.Clear(); }
-		lock (_lastHeardFrom) { _lastHeardFrom.Clear(); }
-		lock (_audioManagers) { _audioManagers.Clear(); }
-		Interlocked.Exchange(ref _inWhisperBubble, 0);
-		Interlocked.Exchange(ref _inRemoteWhisperBubble, 0);
-		if (_babbeliteManager != null) {
-			try {
-				var connectionsList = Traverse.Create(_babbeliteManager).Field<List<BabbeliteConnection>>("_connections").Value;
-				if (connectionsList != null) {
-					lock (connectionsList) {
-						foreach (var conn in connectionsList) {
-							try { Traverse.Create(conn).Method("Disconnect").GetValue(); } catch { }
-						}
-						connectionsList.Clear();
-					}
+		try {
+			lock (_userSessions) {
+				foreach (LiveTranscriptionSession session in _userSessions.Values) {
+					_ = Task.Run(() => {
+						try { session?.Dispose(); } catch { }
+					});
 				}
-			} catch { }
+
+				_userSessions.Clear();
+			}
+			lock (_pendingSessions) { _pendingSessions.Clear(); }
+			lock (_audioAccumulators) { _audioAccumulators.Clear(); }
+			lock (_transmitting) { _transmitting.Clear(); }
+			lock (_lastHeardFrom) { _lastHeardFrom.Clear(); }
+			lock (_audioManagers) { _audioManagers.Clear(); }
+			Interlocked.Exchange(ref _inWhisperBubble, 0);
+			Interlocked.Exchange(ref _inRemoteWhisperBubble, 0);
+			if (_babbeliteManager != null) {
+				try {
+					var connectionsList = Traverse.Create(_babbeliteManager).Field<List<BabbeliteConnection>>("_connections").Value;
+					if (connectionsList != null) {
+						lock (connectionsList) {
+							foreach (var conn in connectionsList) {
+								try { Traverse.Create(conn).Method("Disconnect").GetValue(); } catch { }
+							}
+							connectionsList.Clear();
+						}
+					}
+				} catch { }
+			}
+		} catch (Exception ex) {
+			Warn($"Failed to reset Babbelite state: {ex}");
 		}
 	}
 
@@ -298,6 +313,7 @@ public class IWantBabbelite : ResoniteMod {
 					return session;
 
 				} catch (Exception ex) {
+					Warn($"Exception while creating Babbelite transcription session: {ex}");
 					if (ex.InnerException is System.Net.Sockets.SocketException ||
 						ex.InnerException is IOException ||
 						ex.InnerException is WebSocketException) {
@@ -663,6 +679,7 @@ public class IWantBabbelite : ResoniteMod {
 	}
 
 	private static void ProcessAudio(User user, float[] audioData, int count, int sourceSampleRate) {
+		if (Engine.Current.IsShuttingDown) return;
 		if (!Config!.GetValue(Enabled)) return;
 		if (!Config!.GetValue(TranscribeRemoteUsers) && !user.IsLocalUser) return;
 		if (!IsAudioProcessingAllowed(user).result) return;
