@@ -56,6 +56,7 @@ public class IWantBabbelite : ResoniteMod {
 	public static readonly ModConfigurationKey<bool> UserspaceIgnoresPauses = new("Ignore pausing in Userspace", "Should your transcription still be passed on to Userspace, regardless of any transcription pause?", () => true);
 
 	private static BabbeliteClient? _babbeliteManager;
+	private static Delegate? _serverDiscoveredHandler;
 	private static readonly Dictionary<(World World, RefID RefID), LiveTranscriptionSession> _userSessions = [];
 	private static readonly HashSet<(World World, RefID RefID)> _pendingSessions = [];
 	private static readonly HashSet<(World World, RefID RefID)> _transmitting = [];
@@ -232,9 +233,16 @@ public class IWantBabbelite : ResoniteMod {
 	}
 
 	private void OnConfigurationChanged(ConfigurationChangedEvent @event) {
-		if (@event.Key == Enabled && !Config!.GetValue(Enabled)) {
-			Msg("Mod was disabled, shutting down Babbelite client...");
-			ResetState();
+		if (@event.Key == Enabled) {
+			if (!Config!.GetValue(Enabled)) {
+				Msg("Mod was disabled, shutting down Babbelite client...");
+				StopDiscovery();
+				ResetState();
+			} else {
+				Msg("Mod was re-enabled, waking up Babbelite client");
+				ResetState();
+				DiscoveryAtHome();
+			}
 		} else if (@event.Key == TranscribeRemoteUsers && !Config!.GetValue(TranscribeRemoteUsers)) {
 			Msg("Transcription of remote users disabled, cleaning up local slots");
 
@@ -248,7 +256,7 @@ public class IWantBabbelite : ResoniteMod {
 						if (u != null && !u.IsLocalUser) {
 							remoteSessionsToPurge.Add((world, u.ReferenceID));
 
-							Slot? localBabbeliteSlot = u.Root.Slot.FindLocalChild(SLOT_NAME);
+							Slot? localBabbeliteSlot = u.Root?.Slot?.FindLocalChild(SLOT_NAME);
 							localBabbeliteSlot?.Destroy();
 						}
 					}
@@ -275,12 +283,28 @@ public class IWantBabbelite : ResoniteMod {
 			if (listener != null) {
 				var eventInfo = listener.GetType().GetEvent("ServerDiscovered");
 
-				var handler = new Action<BabbeliteServerInfo>(OnServerDiscovered);
-				var typedDelegate = Delegate.CreateDelegate(eventInfo!.EventHandlerType!, handler.Target, handler.Method);
+				if (_serverDiscoveredHandler != null) {
+					eventInfo!.RemoveEventHandler(listener, _serverDiscoveredHandler);
+					_serverDiscoveredHandler = null;
+				}
 
-				eventInfo.AddEventHandler(listener, typedDelegate);
+				var handler = new Action<BabbeliteServerInfo>(OnServerDiscovered);
+				_serverDiscoveredHandler = Delegate.CreateDelegate(eventInfo!.EventHandlerType!, handler.Target, handler.Method);
+				eventInfo.AddEventHandler(listener, _serverDiscoveredHandler);
 
 				Msg("Now looking for Babbelite servers...");
+
+				var getDiscoveredMethod = listener.GetType().GetMethod("GetDiscoveredSessions");
+				if (getDiscoveredMethod != null) {
+					var sessionsList = new List<BabbeliteServerInfo>();
+					getDiscoveredMethod.Invoke(listener, [sessionsList]);
+
+					foreach (BabbeliteServerInfo session in sessionsList) {
+						Msg($"Reconnecting to an existing server: {session.ServerName}");
+						OnServerDiscovered(session);
+					}
+				}
+
 			} else {
 				Error("Couldn't find the BabbeliteClient's _listener!");
 			}
@@ -330,6 +354,24 @@ public class IWantBabbelite : ResoniteMod {
 					throw;
 				}
 			});
+		}
+	}
+
+	static void StopDiscovery() {
+		if (_serverDiscoveredHandler == null || _babbeliteManager == null) return;
+
+		try {
+			var listenerField = typeof(BabbeliteClient).GetField("_listener", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+			var listener = listenerField?.GetValue(_babbeliteManager);
+
+			if (listener != null) {
+				var eventInfo = listener.GetType().GetEvent("ServerDiscovered");
+				eventInfo!.RemoveEventHandler(listener, _serverDiscoveredHandler);
+				_serverDiscoveredHandler = null;
+				Msg("Stopped looking for Babbelite servers.");
+			}
+		} catch (Exception ex) {
+			Warn($"Failed to unhook discovery: {ex}");
 		}
 	}
 
