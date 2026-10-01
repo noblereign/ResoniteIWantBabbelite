@@ -8,7 +8,7 @@ Currently only tested with transcription.
 
 https://github.com/user-attachments/assets/5eb551f1-85ad-47b8-b719-701a895d0f09
 
-<img width="1550" height="872" alt="Discord_114932" src="https://github.com/user-attachments/assets/8abe90e9-eff5-4e8f-8e1a-65337f835352" />
+<img width="1550" height="930" alt="Discord_115104" src="https://github.com/user-attachments/assets/01ec4710-625d-424e-8e9b-75a960aa2f1c" />
 
 <img width="979" height="512" alt="LosslessCut_114930" src="https://github.com/user-attachments/assets/6413ef48-1300-4a4e-8924-0bc8859f0e69" />
 
